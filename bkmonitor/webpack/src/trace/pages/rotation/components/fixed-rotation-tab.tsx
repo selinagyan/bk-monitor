@@ -55,7 +55,7 @@ export default defineComponent({
       default: () => []
     }
   },
-  emits: ['change', 'reset'],
+  emits: ['change', 'preview'],
   setup(props, { emit }) {
     // --------公共------------
     const { t } = useI18n();
@@ -98,7 +98,7 @@ export default defineComponent({
       } else {
         item.workDateRange = [];
       }
-      handleEmitReset();
+      handleEmitData(false);
     };
     function handleAddItem() {
       localValue.push(createDefaultData());
@@ -111,11 +111,12 @@ export default defineComponent({
       item.users = val;
       handleEmitData();
     }
-    function handleEmitData() {
+    function handleEmitData(isPreview = true) {
       emit('change', localValue);
+      if (isPreview) handleEmitPreview();
     }
-    function handleEmitReset() {
-      emit('reset', localValue);
+    function handleEmitPreview() {
+      emit('preview');
     }
 
     return {
@@ -176,8 +177,9 @@ export default defineComponent({
                   <Select
                     class='date-value-select'
                     v-model={item.workDays}
-                    onToggle={val => !val && this.handleEmitData()}
+                    onToggle={() => this.handleEmitData()}
                     multiple
+                    clearable={false}
                   >
                     {WeekDataList.map(week => (
                       <Select.Option
@@ -191,7 +193,7 @@ export default defineComponent({
                   <CalendarSelect
                     class='date-value-select'
                     v-model={item.workDays}
-                    onSelectEnd={this.handleEmitData}
+                    onSelectEnd={() => this.handleEmitData()}
                   />
                 )}
                 {item.type === RotationSelectTypeEnum.DateRange && (
@@ -199,7 +201,7 @@ export default defineComponent({
                     class='date-value-select'
                     v-model={item.workDateRange}
                     format='yyyy-MM-dd'
-                    onChange={this.handleEmitData}
+                    onChange={() => this.handleEmitData()}
                     placeholder={`${this.t('如')}: 2019-01-30 至 2019-01-30`}
                     type='daterange'
                     append-to-body
@@ -213,7 +215,7 @@ export default defineComponent({
               >
                 <TimeTagPicker
                   v-model={item.workTime}
-                  onChange={this.handleEmitData}
+                  onChange={() => this.handleEmitData()}
                 ></TimeTagPicker>
               </FormItem>
             </td>

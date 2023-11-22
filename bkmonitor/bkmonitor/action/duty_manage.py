@@ -274,7 +274,12 @@ class DutyRuleManager:
 
             if work_time:
                 duty_plans.append(
-                    {"users": duty_arrange["duty_users"][0], "user_index": index, "work_times": work_time}
+                    {
+                        "users": duty_arrange["duty_users"][0],
+                        "order": index,
+                        "user_index": index,
+                        "work_times": work_time,
+                    }
                 )
         return duty_plans
 
@@ -286,13 +291,21 @@ class DutyRuleManager:
         if not self.duty_arranges:
             return []
         # 轮值情况下只有一个
-        duty_arrange = self.duty_arranges[0]
+        for order, duty_arrange in enumerate(self.duty_arranges):
+            self.get_one_handoff_duty_plan(duty_arrange, order, duty_plans)
+        return duty_plans
 
+    def get_one_handoff_duty_plan(self, duty_arrange, order, duty_plans: list):
+        """
+        获取单个安排的计划
+        """
         duty_users = duty_arrange["duty_users"]
         duty_times = duty_arrange["duty_time"]
+        last_user_index = duty_arrange.get("last_user_index") or self.last_user_index
         group_user_number = 1
         period_interval = 1
-        if duty_arrange["group_type"] == DutyGroupType.AUTO:
+        group_type = duty_arrange.get("group_type", DutyGroupType.SPECIFIED)
+        if group_type == DutyGroupType.AUTO:
             # 如果人员信息为自动
             group_user_number = duty_arrange["group_number"]
             duty_users = duty_users[0]
@@ -340,9 +353,9 @@ class DutyRuleManager:
             current_duty_dates = duty_date_times[date_index : date_index + period_interval]
             date_index = date_index + period_interval
             # 根据设置的用户数量进行轮转
-            current_user_index = self.last_user_index
-            users, self.last_user_index = self.get_group_duty_users(
-                duty_users, self.last_user_index, group_user_number, duty_arrange["group_type"]
+            current_user_index = last_user_index
+            users, last_user_index = self.get_group_duty_users(
+                duty_users, last_user_index, group_user_number, group_type
             )
             duty_work_time = []
             for one_period_dates in current_duty_dates:
@@ -358,7 +371,10 @@ class DutyRuleManager:
 
                     duty_work_time.extend(self.get_time_range_work_time(day["date"], day["work_time_list"]))
 
-            duty_plans.append({"users": users, "user_index": current_user_index, "work_times": duty_work_time})
+            duty_plans.append(
+                {"users": users, "user_index": current_user_index, "order": order, "work_times": duty_work_time}
+            )
+        duty_arrange["last_user_index"] = last_user_index
         return duty_plans
 
     @staticmethod
@@ -619,7 +635,8 @@ class GroupDutyRuleManager:
                     users=duty_plan["users"],
                     work_times=duty_plan["work_times"],
                     is_effective=1,
-                    order=duty_plan.get("user_index", 0),
+                    order=duty_plan.get("order", 0),
+                    user_index=duty_plan.get("user_index", 0),
                 )
             )
 
@@ -634,6 +651,9 @@ class GroupDutyRuleManager:
         logger.info("[manage_duty_plan] finished for user group(%s) snap(%s)", self.user_group.id, snap_id)
 
     def manage_duty_notice(self):
+        """
+        排班通知管理
+        """
         duty_notice = self.user_group.duty_notice
         plan_notice = duty_notice.get("plan_notice", {})
         personal_notice = duty_notice.get("personal_notice")
@@ -649,6 +669,7 @@ class GroupDutyRuleManager:
         """
         if not plan_notice["enabled"]:
             # 如果没有开启直接不用判断
+            logger.info("[send_plan_notice] duty plan notice  of group(%s) is disabled", self.user_group.id)
             return
 
         current_time_str = time_tools.datetime2str(current_time, "%H:%M")
@@ -667,6 +688,9 @@ class GroupDutyRuleManager:
 
         if compare_time > current_time_str or compare_date != current_date:
             # 如果不满足条件，直接返回
+            logger.info(
+                "[send_plan_notice] finished duty plan notice  of group(%s), time is not matched", self.user_group.id
+            )
             return
 
         end_datetime = current_time + timedelta(days=plan_notice["days"])
@@ -674,7 +698,10 @@ class GroupDutyRuleManager:
         chat_ids = plan_notice["chat_ids"]
         if not chat_ids:
             # 如果没有配置机器人，直接返回
-            logger.info(" duty plan notice's field(chat_ids) of group(%s) is empty", self.user_group.id)
+            logger.info(
+                "[send_plan_notice] ignore notice because duty plan notice's field(chat_ids) of group(%s) is empty",
+                self.user_group.id,
+            )
             return
 
         last_record = DutyPlanSendRecord.objects.filter(user_group_id=self.user_group.id).first()
@@ -692,8 +719,8 @@ class GroupDutyRuleManager:
                 start_time__lte=time_tools.datetime2str(end_datetime),
             )
             | Q(
-                start_time__lte=time_tools.datetime2str(current_time),
-                finished_time__gte=time_tools.datetime2str(current_time),
+                Q(start_time__lte=time_tools.datetime2str(current_time))
+                & Q(Q(finished_time__gte=time_tools.datetime2str(current_time)) | Q(finished_time__in=["", None])),
             )
         )
         duty_plans = [
@@ -702,18 +729,23 @@ class GroupDutyRuleManager:
                 "users": duty_plan.users,
                 "start_time": duty_plan.start_time,
                 "finished_time": duty_plan.finished_time,
+                "work_times": duty_plan.work_times,
             }
             for duty_plan in duty_plan_queryset
         ]
 
         if not duty_plans:
             # 没有生成排班计划。这可能算得上是一个告警了
-            notice_content = ["\\n> 当前告警组没有轮班计划"]
+            notice_content = ["\\n> No Data"]
         else:
             notice_content = []
         for duty_plan in duty_plans:
             duty_users = ",".join([f'{user["id"]}({user.get("display_name")})' for user in duty_plan["users"]])
-            notice_content.append(f"\\n> {duty_plan['start_time']} -- {duty_plan['finished_time']}  {duty_users}")
+            duty_contents = []
+            for work_time in duty_plan["work_times"]:
+                duty_contents.append(f"\\n> {work_time['start_time']} -- {work_time['end_time']}  {duty_users}")
+            if duty_contents:
+                notice_content.extend(duty_contents)
         sender = Sender(
             context={
                 "bk_biz_id": self.user_group.bk_biz_id,
@@ -752,6 +784,7 @@ class GroupDutyRuleManager:
         """
         if not personal_notice.get("enabled"):
             # 没有开启通知，直接返回
+            logger.info("[send_personal_notice] duty personal notice of group(%s) is disabled", self.user_group.id)
             return
         start_time = current_time + timedelta(hours=personal_notice["hours_ago"])
         end_time = start_time + timedelta(seconds=60)
@@ -774,11 +807,16 @@ class GroupDutyRuleManager:
                 "users": duty_plan.users,
                 "start_time": duty_plan.start_time,
                 "finished_time": duty_plan.finished_time,
+                "work_times": duty_plan.work_times,
             }
             for duty_plan in duty_plan_queryset
         ]
         if not duty_plans:
             # 没有排班计划，直接返回
+            logger.info(
+                "[send_personal_notice] ignore duty personal notice of group(%s)  because of empty duty plan",
+                self.user_group.id,
+            )
             return
 
         # 更新一下最近范围内的发送时间
@@ -790,11 +828,13 @@ class GroupDutyRuleManager:
         user_duty_plans = defaultdict(list)
         for duty_plan in duty_plans:
             duty_users = ",".join([f'{user["id"]}({user.get("display_name")})' for user in duty_plan["users"]])
-            duty_content = f"{duty_plan['start_time']} -- {duty_plan['finished_time']}  {duty_users}"
+            duty_contents = []
+            for work_time in duty_plan["work_times"]:
+                duty_contents.append(f"{work_time['start_time']} -- {work_time['end_time']}  {duty_users}")
             for user in duty_plan["users"]:
                 if user["type"] == "group":
                     continue
-                user_duty_plans[user["id"]].append(duty_content)
+                user_duty_plans[user["id"]].extend(duty_contents)
         failed_list = []
         succeed_list = []
         if len(duty_plans) == 1:
