@@ -209,7 +209,9 @@ class BaseQueryHandler:
     ):
         self.start_time = start_time
         # 结束时间为未来时间的时候，默认为当前时间 加1min
-        self.end_time = min(int(time.time() + 60), end_time)
+        self.end_time = end_time
+        if self.end_time:
+            self.end_time = min(int(time.time() + 60), end_time)
         self.query_string = query_string
         self.conditions = conditions
         self.page = page
